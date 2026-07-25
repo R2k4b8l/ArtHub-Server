@@ -14,739 +14,1258 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const Port = process.env.PORT;
+
 // CORS setup
 app.use(
-    cors({
-        origin: process.env.CLIENT_URL,
-        credentials: true,
-        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
-    }),
+  cors({
+    origin: process.env.CLIENT_URL,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
 );
 
 app.all("/api/auth/*splat", toNodeHandler(auth));
 
 // Webhook route
 app.post(
-    "/webhook",
-    express.raw({ type: "*/*" }),
-    async (req, res) => {
-        const sig = req.headers["stripe-signature"];
-        let event;
+  "/webhook",
+  express.raw({ type: "*/*" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    let event;
 
-        console.log("Webhook body type:", typeof req.body);
-        console.log("Is Buffer:", Buffer.isBuffer(req.body));
-        console.log("Body length:", req.body ? req.body.length : "null");
-        console.log("Stripe Signature Header:", sig);
-        console.log("Secret in code:", process.env.STRIPE_WEBHOOK_SECRET);
+    console.log("Webhook body type:", typeof req.body);
+    console.log("Is Buffer:", Buffer.isBuffer(req.body));
+    console.log("Body length:", req.body ? req.body.length : "null");
+    console.log("Stripe Signature Header:", sig);
+    console.log("Secret in code:", process.env.STRIPE_WEBHOOK_SECRET);
 
-        try {
-            event = stripe.webhooks.constructEvent(
-                req.body,
-                sig,
-                process.env.STRIPE_WEBHOOK_SECRET,
-            );
-        } catch (err) {
-            console.error("Webhook signature verification failed:", err.message);
-            return res.status(400).send(`Webhook Error: ${err.message}`);
-        }
-
-        if (event.type === "checkout.session.completed") {
-            const session = event.data.object;
-            const metadata = session.metadata;
-
-            try {
-                if (metadata.type === "subscription") {
-                    const { userId, plan } = metadata;
-                    const dbUser = await User.findOne({ _id: new ObjectId(userId) });
-                    if (dbUser) {
-                        const previousPlan = dbUser.subscription?.plan || "free";
-                        let purchaseLimit = 3;
-                        if (plan === "pro") {
-                            purchaseLimit = 9;
-                        }
-                        if (plan === "premium") {
-                            purchaseLimit = -1;
-                        }
-                        await User.updateOne(
-                            { _id: new ObjectId(userId) },
-                            {
-                                $set: {
-                                    subscription: {
-                                        plan,
-                                        purchaseLimit,
-                                        purchasedThisMonth: 0,
-                                        currentMonth: new Date().toISOString().slice(0, 7),
-                                    },
-                                },
-                            },
-                        );
-                        const transactionId = `AH-S-${userId.toString().slice(-6).toUpperCase()}`;
-                        await SubscriptionHistory.insertOne({
-                            transactionId,
-                            userId,
-                            userName: dbUser.name,
-                            userEmail: dbUser.email,
-                            previousPlan: previousPlan,
-                            newPlan: plan,
-                            changedAt: new Date().toISOString(),
-                        });
-                    }
-                } else if (metadata.type === "artwork") {
-                    const { artworkId, buyerId, buyerName, buyerEmail, buyerImage } = metadata;
-                    const artwork = await ArtWorks.findOne({ _id: new ObjectId(artworkId) });
-                    const buyer = await User.findOne({ _id: new ObjectId(buyerId) });
-
-                    if (artwork && buyer && !artwork.isSold) {
-                        const transactionId = `AH-P-${artwork._id.toString().slice(-6).toUpperCase()}`;
-                        const purchaseData = {
-                            transactionId,
-                            artworkId: artwork._id.toString(),
-                            artworkTitle: artwork.title,
-                            artworkImage: artwork.image,
-                            artworkCategory: artwork.category,
-                            price: artwork.price,
-                            artistId: artwork.artistId,
-                            artistName: artwork.artistName,
-                            buyerId,
-                            buyerName: buyerName || buyer.name,
-                            buyerEmail: buyerEmail || buyer.email,
-                            buyerImage: buyerImage || buyer.image || null,
-                            purchasedAt: new Date().toISOString(),
-                        };
-
-                        await PurchasesArtworks.insertOne(purchaseData);
-
-                        await ArtWorks.updateOne(
-                            { _id: new ObjectId(artworkId) },
-                            {
-                                $set: {
-                                    status: "sold",
-                                    isSold: true,
-                                    purchasedBy: buyerName || buyer.name,
-                                },
-                            },
-                        );
-
-                        await User.updateOne(
-                            { _id: new ObjectId(buyerId) },
-                            {
-                                $inc: {
-                                    "subscription.purchasedThisMonth": 1,
-                                },
-                            },
-                        );
-                    }
-                }
-            } catch (dbError) {
-                console.error("Database operation failed in webhook:", dbError);
-                return res.status(500).send(`Webhook DB Error: ${dbError.message}`);
-            }
-        }
-
-        res.send({ received: true });
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET,
+      );
+    } catch (err) {
+      console.error("Webhook signature verification failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const metadata = session.metadata;
+
+      try {
+        if (metadata.type === "subscription") {
+          const { userId, plan } = metadata;
+          const dbUser = await User.findOne({ _id: new ObjectId(userId) });
+          if (dbUser) {
+            const previousPlan = dbUser.subscription?.plan || "free";
+            let purchaseLimit = 3;
+            if (plan === "pro") {
+              purchaseLimit = 9;
+            }
+            if (plan === "premium") {
+              purchaseLimit = -1;
+            }
+            await User.updateOne(
+              { _id: new ObjectId(userId) },
+              {
+                $set: {
+                  subscription: {
+                    plan,
+                    purchaseLimit,
+                    purchasedThisMonth: 0,
+                    currentMonth: new Date().toISOString().slice(0, 7),
+                  },
+                },
+              },
+            );
+            const transactionId = `AH-S-${userId.toString().slice(-6).toUpperCase()}`;
+            await SubscriptionHistory.insertOne({
+              transactionId,
+              userId,
+              userName: dbUser.name,
+              userEmail: dbUser.email,
+              previousPlan: previousPlan,
+              newPlan: plan,
+              changedAt: new Date().toISOString(),
+            });
+          }
+        } else if (metadata.type === "artwork") {
+          const { artworkId, buyerId, buyerName, buyerEmail, buyerImage } = metadata;
+          const artwork = await ArtWorks.findOne({ _id: new ObjectId(artworkId) });
+          const buyer = await User.findOne({ _id: new ObjectId(buyerId) });
+
+          if (artwork && buyer && !artwork.isSold) {
+            const transactionId = `AH-P-${artwork._id.toString().slice(-6).toUpperCase()}`;
+            const purchaseData = {
+              transactionId,
+              artworkId: artwork._id.toString(),
+              artworkTitle: artwork.title,
+              artworkImage: artwork.image,
+              artworkCategory: artwork.category,
+              price: artwork.price,
+              artistId: artwork.artistId,
+              artistName: artwork.artistName,
+              buyerId,
+              buyerName: buyerName || buyer.name,
+              buyerEmail: buyerEmail || buyer.email,
+              buyerImage: buyerImage || buyer.image || null,
+              purchasedAt: new Date().toISOString(),
+            };
+
+            await PurchasesArtworks.insertOne(purchaseData);
+
+            await ArtWorks.updateOne(
+              { _id: new ObjectId(artworkId) },
+              {
+                $set: {
+                  status: "sold",
+                  isSold: true,
+                  purchasedBy: buyerName || buyer.name,
+                },
+              },
+            );
+
+            await User.updateOne(
+              { _id: new ObjectId(buyerId) },
+              {
+                $inc: {
+                  "subscription.purchasedThisMonth": 1,
+                },
+              },
+            );
+          }
+        }
+      } catch (dbError) {
+        console.error("Database operation failed in webhook:", dbError);
+        return res.status(500).send(`Webhook DB Error: ${dbError.message}`);
+      }
+    }
+
+    res.send({ received: true });
+  }
 );
 
 app.use(express.json());
 
 app.get("/", (req, res) => {
-    res.send(`ArtHub Server`);
+  res.send(`ArtHub Server`);
 });
 
 const run = async () => {
-    try {
-        await client.connect();
-        const db = client.db("ArtHub");
-        ArtWorks = db.collection("ArtWorks");
-        User = db.collection("user");
-        PurchasesArtworks = db.collection("purchasesArtworks");
-        const Comments = db.collection("Comments");
-        SubscriptionHistory = db.collection("SubscriptionHistory");
+  try {
+    await client.connect();
+    const db = client.db("ArtHub");
+    ArtWorks = db.collection("ArtWorks");
+    User = db.collection("user");
+    PurchasesArtworks = db.collection("purchasesArtworks");
+    const Comments = db.collection("Comments");
+    SubscriptionHistory = db.collection("SubscriptionHistory");
 
-        app.get("/artworks", async (req, res) => {
-            try {
-                const { search, category, status, sort, artistId, page, limit } =
-                    req.query;
-                let query = {};
+    app.get("/artworks", async (req, res) => {
+      try {
+        const { search, category, status, sort, artistId, page, limit } =
+          req.query;
+        let query = {};
 
-                if (search) {
-                    query.$or = [
-                        { title: { $regex: search, $options: "i" } },
-                        { artistName: { $regex: search, $options: "i" } },
-                    ];
-                }
+        if (search) {
+          query.$or = [
+            { title: { $regex: search, $options: "i" } },
+            { artistName: { $regex: search, $options: "i" } },
+          ];
+        }
 
-                if (category) {
-                    query.category = category;
-                }
+        if (category) {
+          query.category = category;
+        }
 
-                if (status) {
-                    query.status = status;
-                }
+        if (status) {
+          query.status = status;
+        }
 
-                if (artistId) {
-                    query.artistId = artistId;
-                }
+        if (artistId) {
+          query.artistId = artistId;
+        }
 
-                let sortOption = {};
-                if (sort === "a-z") {
-                    sortOption.title = 1;
-                } else if (sort === "z-a") {
-                    sortOption.title = -1;
-                } else if (sort === "low-to-high") {
-                    sortOption.price = 1;
-                } else if (sort === "high-to-low") {
-                    sortOption.price = -1;
-                } else {
-                    sortOption._id = -1;
-                }
+        let sortOption = {};
+        if (sort === "a-z") {
+          sortOption.title = 1;
+        } else if (sort === "z-a") {
+          sortOption.title = -1;
+        } else if (sort === "low-to-high") {
+          sortOption.price = 1;
+        } else if (sort === "high-to-low") {
+          sortOption.price = -1;
+        } else {
+          sortOption._id = -1;
+        }
 
-                let cursor = ArtWorks.find(query).sort(sortOption);
+        let cursor = ArtWorks.find(query).sort(sortOption);
 
-                if (page) {
-                    const parsedPage = parseInt(page, 10) || 1;
-                    const parsedLimit = parseInt(limit, 10) || 12;
-                    const skip = (parsedPage - 1) * parsedLimit;
+        if (page) {
+          const parsedPage = parseInt(page, 10) || 1;
+          const parsedLimit = parseInt(limit, 10) || 12;
+          const skip = (parsedPage - 1) * parsedLimit;
 
-                    const totalCount = await ArtWorks.countDocuments(query);
-                    const artworks = await cursor.skip(skip).limit(parsedLimit).toArray();
+          const totalCount = await ArtWorks.countDocuments(query);
+          const artworks = await cursor.skip(skip).limit(parsedLimit).toArray();
 
-                    res.send({
-                        artworks,
-                        totalCount,
-                        totalPages: Math.ceil(totalCount / parsedLimit),
-                        currentPage: parsedPage,
-                    });
-                } else {
-                    if (limit) {
-                        cursor = cursor.limit(parseInt(limit, 10));
-                    }
-                    const final = await cursor.toArray();
-                    res.send(final);
-                }
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
+          res.send({
+            artworks,
+            totalCount,
+            totalPages: Math.ceil(totalCount / parsedLimit),
+            currentPage: parsedPage,
+          });
+        } else {
+          if (limit) {
+            cursor = cursor.limit(parseInt(limit, 10));
+          }
+          const final = await cursor.toArray();
+          res.send(final);
+        }
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+    // Filter
+    app.get("/artworks/filters", async (req, res) => {
+      try {
+        const categories = await ArtWorks.distinct("category");
+        const statuses = await ArtWorks.distinct("status");
+        res.send({
+          categories: categories.filter(Boolean),
+          statuses: statuses.filter(Boolean),
+        });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Top Artists
+    app.get("/artists/top", async (req, res) => {
+      try {
+        const artists = await User.find({ role: "artist" }).toArray();
+        const artistIds = artists.map(artist => artist._id.toString());
+
+        // Fetch artworks for these artists only
+        const artworks = await ArtWorks.find({ artistId: { $in: artistIds } }).toArray();
+
+        const artistMap = {};
+        artists.forEach(artist => {
+          artistMap[artist._id.toString()] = {
+            id: artist._id.toString(),
+            name: artist.name,
+            email: artist.email,
+            image: artist.image || "/default-avatar.png",
+            artworks: 0,
+            sales: 0
+          };
         });
 
-        // Filter
-        app.get("/artworks/filters", async (req, res) => {
-            try {
-                const categories = await ArtWorks.distinct("category");
-                const statuses = await ArtWorks.distinct("status");
-                res.send({
-                    categories: categories.filter(Boolean),
-                    statuses: statuses.filter(Boolean),
-                });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
+        artworks.forEach(art => {
+          const aId = art.artistId;
+          if (aId && artistMap[aId]) {
+            artistMap[aId].artworks++;
+            if (art.isSold || art.status === "sold") {
+              artistMap[aId].sales++;
             }
+          }
         });
 
-        // Top Artists
-        app.get("/artists/top", async (req, res) => {
-            try {
-                const artists = await User.find({ role: "artist" }).toArray();
-                const artistIds = artists.map(artist => artist._id.toString());
+        const topArtists = Object.values(artistMap)
+          .sort((a, b) => {
+            const scoreA = a.sales * 10 + a.artworks;
+            const scoreB = b.sales * 10 + b.artworks;
+            return scoreB - scoreA;
+          })
+          .slice(0, 3);
 
-                // Fetch artworks for these artists only
-                const artworks = await ArtWorks.find({ artistId: { $in: artistIds } }).toArray();
+        res.send(topArtists);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
 
-                const artistMap = {};
-                artists.forEach(artist => {
-                    artistMap[artist._id.toString()] = {
-                        id: artist._id.toString(),
-                        name: artist.name,
-                        email: artist.email,
-                        image: artist.image || "/default-avatar.png",
-                        artworks: 0,
-                        sales: 0
-                    };
-                });
+    app.post("/artworks", async (req, res) => {
+      try {
+        const {
+          title,
+          category,
+          description,
+          price,
+          image,
+          artistName,
+          artistEmail,
+          artistId,
+        } = req.body;
 
-                artworks.forEach(art => {
-                    const aId = art.artistId;
-                    if (aId && artistMap[aId]) {
-                        artistMap[aId].artworks++;
-                        if (art.isSold || art.status === "sold") {
-                            artistMap[aId].sales++;
-                        }
-                    }
-                });
+        if (
+          !title ||
+          !category ||
+          !price ||
+          !image ||
+          !artistName ||
+          !artistEmail
+        ) {
+          return res.status(400).send({ error: "Missing required fields" });
+        }
 
-                const topArtists = Object.values(artistMap)
-                    .sort((a, b) => {
-                        const scoreA = a.sales * 10 + a.artworks;
-                        const scoreB = b.sales * 10 + b.artworks;
-                        return scoreB - scoreA;
-                    })
-                    .slice(0, 3);
+        const newArtwork = {
+          title,
+          category,
+          description: description || "",
+          price: parseFloat(price),
+          image,
+          artistName,
+          artistEmail,
+          artistId: artistId || null,
+          status: "available",
+          isSold: false,
+          createdAt: new Date().toISOString(),
+          purchasedBy: null,
+        };
 
-                res.send(topArtists);
-            } catch (error) {
-                res.status(500).send({ error: error.message });
+        const result = await ArtWorks.insertOne(newArtwork);
+        res.status(201).send({ success: true, insertedId: result.insertedId });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.patch("/artworks/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid artwork id" });
+        }
+
+        const { title, category, description, price } = req.body;
+        const updateFields = {};
+
+        if (title !== undefined) updateFields.title = title;
+        if (category !== undefined) updateFields.category = category;
+        if (description !== undefined) updateFields.description = description;
+        if (price !== undefined) {
+          const parsedPrice = parseFloat(price);
+          if (Number.isNaN(parsedPrice)) {
+            return res.status(400).send({ error: "Invalid price" });
+          }
+          updateFields.price = parsedPrice;
+        }
+
+        if (Object.keys(updateFields).length === 0) {
+          return res
+            .status(400)
+            .send({ error: "No artwork fields provided to update" });
+        }
+
+        const result = await ArtWorks.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateFields },
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ error: "Artwork not found" });
+        }
+
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.delete("/artworks/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid artwork id" });
+        }
+
+        const result = await ArtWorks.deleteOne({ _id: new ObjectId(id) });
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ error: "Artwork not found" });
+        }
+
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.post("/create-checkout/artwork/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid artwork id" });
+        }
+        if (!ObjectId.isValid(buyerId)) {
+          return res.status(400).send({ error: "Invalid buyer id" });
+        }
+
+        const artwork = await ArtWorks.findOne({ _id: new ObjectId(id) });
+        const buyer = await User.findOne({ _id: new ObjectId(buyerId) });
+
+        if (!artwork) {
+          return res.status(404).send({ error: "Artwork not found" });
+        }
+        if (!buyer) {
+          return res.status(404).send({ error: "Buyer not found" });
+        }
+        if (artwork.isSold) {
+          return res.status(400).send({ error: "Artwork already sold" });
+        }
+        if (artwork.artistId === buyerId) {
+          return res.status(400).send({ error: "Artists cannot purchase their own artwork" });
+        }
+        if (buyer.role === "artist") {
+          return res.status(403).send({ error: "Artist accounts cannot purchase artworks" });
+        }
+        if (!buyer.subscription) {
+          return res.status(400).send({ error: "No subscription found" });
+        }
+
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        let subscription = buyer.subscription;
+
+        if (subscription.currentMonth !== currentMonth) {
+          subscription.purchasedThisMonth = 0;
+          subscription.currentMonth = currentMonth;
+          await User.updateOne(
+            { _id: new ObjectId(buyerId) },
+            {
+              $set: {
+                "subscription.purchasedThisMonth": 0,
+                "subscription.currentMonth": currentMonth,
+              },
             }
-        });
+          );
+        }
 
-        app.post("/artworks", async (req, res) => {
-            try {
-                const {
-                    title,
-                    category,
-                    description,
-                    price,
-                    image,
-                    artistName,
-                    artistEmail,
-                    artistId,
-                } = req.body;
+        if (
+          subscription.purchaseLimit !== -1 &&
+          subscription.purchasedThisMonth >= subscription.purchaseLimit
+        ) {
+          return res.status(403).send({ error: "Monthly purchase limit reached" });
+        }
 
-                if (
-                    !title ||
-                    !category ||
-                    !price ||
-                    !image ||
-                    !artistName ||
-                    !artistEmail
-                ) {
-                    return res.status(400).send({ error: "Missing required fields" });
-                }
-
-                const newArtwork = {
-                    title,
-                    category,
-                    description: description || "",
-                    price: parseFloat(price),
-                    image,
-                    artistName,
-                    artistEmail,
-                    artistId: artistId || null,
-                    status: "available",
-                    isSold: false,
-                    createdAt: new Date().toISOString(),
-                    purchasedBy: null,
-                };
-
-                const result = await ArtWorks.insertOne(newArtwork);
-                res.status(201).send({ success: true, insertedId: result.insertedId });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.patch("/artworks/:id", async (req, res) => {
-            try {
-                const { id } = req.params;
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ error: "Invalid artwork id" });
-                }
-
-                const { title, category, description, price } = req.body;
-                const updateFields = {};
-
-                if (title !== undefined) updateFields.title = title;
-                if (category !== undefined) updateFields.category = category;
-                if (description !== undefined) updateFields.description = description;
-                if (price !== undefined) {
-                    const parsedPrice = parseFloat(price);
-                    if (Number.isNaN(parsedPrice)) {
-                        return res.status(400).send({ error: "Invalid price" });
-                    }
-                    updateFields.price = parsedPrice;
-                }
-
-                if (Object.keys(updateFields).length === 0) {
-                    return res
-                        .status(400)
-                        .send({ error: "No artwork fields provided to update" });
-                }
-
-                const result = await ArtWorks.updateOne(
-                    { _id: new ObjectId(id) },
-                    { $set: updateFields },
-                );
-
-                if (result.matchedCount === 0) {
-                    return res.status(404).send({ error: "Artwork not found" });
-                }
-
-                res.send({ success: true });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.delete("/artworks/:id", async (req, res) => {
-            try {
-                const { id } = req.params;
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ error: "Invalid artwork id" });
-                }
-
-                const result = await ArtWorks.deleteOne({ _id: new ObjectId(id) });
-                if (result.deletedCount === 0) {
-                    return res.status(404).send({ error: "Artwork not found" });
-                }
-
-                res.send({ success: true });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.post("/create-checkout/artwork/:id", async (req, res) => {
-            try {
-                const { id } = req.params;
-                const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
-
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ error: "Invalid artwork id" });
-                }
-                if (!ObjectId.isValid(buyerId)) {
-                    return res.status(400).send({ error: "Invalid buyer id" });
-                }
-
-                const artwork = await ArtWorks.findOne({ _id: new ObjectId(id) });
-                const buyer = await User.findOne({ _id: new ObjectId(buyerId) });
-
-                if (!artwork) {
-                    return res.status(404).send({ error: "Artwork not found" });
-                }
-                if (!buyer) {
-                    return res.status(404).send({ error: "Buyer not found" });
-                }
-                if (artwork.isSold) {
-                    return res.status(400).send({ error: "Artwork already sold" });
-                }
-                if (artwork.artistId === buyerId) {
-                    return res.status(400).send({ error: "Artists cannot purchase their own artwork" });
-                }
-                if (buyer.role === "artist") {
-                    return res.status(403).send({ error: "Artist accounts cannot purchase artworks" });
-                }
-                if (!buyer.subscription) {
-                    return res.status(400).send({ error: "No subscription found" });
-                }
-
-                const currentMonth = new Date().toISOString().slice(0, 7);
-                let subscription = buyer.subscription;
-
-                if (subscription.currentMonth !== currentMonth) {
-                    subscription.purchasedThisMonth = 0;
-                    subscription.currentMonth = currentMonth;
-                    await User.updateOne(
-                        { _id: new ObjectId(buyerId) },
-                        {
-                            $set: {
-                                "subscription.purchasedThisMonth": 0,
-                                "subscription.currentMonth": currentMonth,
-                            },
-                        }
-                    );
-                }
-
-                if (
-                    subscription.purchaseLimit !== -1 &&
-                    subscription.purchasedThisMonth >= subscription.purchaseLimit
-                ) {
-                    return res.status(403).send({ error: "Monthly purchase limit reached" });
-                }
-
-                const session = await stripe.checkout.sessions.create({
-                    customer_email: buyerEmail || buyer?.email || undefined,
-                    payment_method_types: ["card"],
-                    line_items: [
-                        {
-                            price_data: {
-                                currency: "usd",
-                                product_data: {
-                                    name: artwork.title,
-                                    images: artwork.image ? [artwork.image] : [],
-                                },
-                                unit_amount: Math.round(artwork.price * 100),
-                            },
-                            quantity: 1,
-                        },
-                    ],
-                    mode: "payment",
-                    success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                    cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
-                    metadata: {
-                        artworkId: id.toString(),
-                        buyerId: buyerId.toString(),
-                        buyerName: String(buyerName || buyer.name || ""),
-                        buyerEmail: String(buyerEmail || buyer.email || ""),
-                        buyerImage: String(buyerImage || buyer.image || ""),
-                        type: "artwork",
-                    },
-                });
-
-                res.send({ url: session.url });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.post("/create-checkout/subscription", async (req, res) => {
-            try {
-                const { userId, plan } = req.body;
-
-                if (!ObjectId.isValid(userId)) {
-                    return res.status(400).send({ error: "Invalid user id" });
-                }
-
-                const user = await User.findOne({ _id: new ObjectId(userId) });
-                if (!user) {
-                    return res.status(404).send({ error: "User not found" });
-                }
-
-                let priceInCents = 0;
-                if (plan === "pro") {
-                    priceInCents = 999;
-                } else if (plan === "premium") {
-                    priceInCents = 1999;
-                } else {
-                    return res.status(400).send({ error: "Invalid plan" });
-                }
-
-                const session = await stripe.checkout.sessions.create({
-                    customer_email: user?.email || undefined,
-                    payment_method_types: ["card"],
-                    line_items: [
-                        {
-                            price_data: {
-                                currency: "usd",
-                                product_data: {
-                                    name: `ArtHub ${plan.charAt(0).toUpperCase() + plan.slice(1)} Subscription`,
-                                },
-                                unit_amount: priceInCents,
-                            },
-                            quantity: 1,
-                        },
-                    ],
-                    mode: "payment",
-                    success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                    cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
-                    metadata: {
-                        userId: userId.toString(),
-                        plan: plan,
-                        type: "subscription",
-                    },
-                });
-
-                res.send({ url: session.url });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.get("/verify-payment/:sessionId", async (req, res) => {
-            try {
-                const { sessionId } = req.params;
-                const session = await stripe.checkout.sessions.retrieve(sessionId);
-                res.send({
-                    status: session.status,
-                    payment_status: session.payment_status,
-                    metadata: session.metadata,
-                });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
-        });
-
-        app.post("/purchase/:id", async (req, res) => {
-            try {
-                const { id } = req.params;
-
-                const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
-
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({
-                        error: "Invalid artwork id",
-                    });
-                }
-
-                if (!ObjectId.isValid(buyerId)) {
-                    return res.status(400).send({
-                        error: "Invalid buyer id",
-                    });
-                }
-
-                const artwork = await ArtWorks.findOne({
-                    _id: new ObjectId(id),
-                });
-
-                const buyer = await User.findOne({
-                    _id: new ObjectId(buyerId),
-                });
-
-                if (!buyer) {
-                    return res.status(404).send({
-                        error: "Buyer not found",
-                    });
-                }
-
-                if (!artwork) {
-                    return res.status(404).send({
-                        error: "Artwork not found",
-                    });
-                }
-
-                if (artwork.artistId === buyerId) {
-                    return res.status(400).send({
-                        error: "Artists cannot purchase their own artwork",
-                    });
-                }
-
-                if (buyer.role === "artist") {
-                    return res.status(403).send({
-                        error: "Artist accounts cannot purchase artworks",
-                    });
-                }
-
-                // Subscription validation
-                const currentMonth = new Date().toISOString().slice(0, 7);
-
-                if (!buyer.subscription) {
-                    return res.status(400).send({
-                        error: "No subscription found",
-                    });
-                }
-
-                let subscription = buyer.subscription;
-
-                // Reset monthly purchase
-                if (subscription.currentMonth !== currentMonth) {
-                    subscription.purchasedThisMonth = 0;
-                    subscription.currentMonth = currentMonth;
-
-                    await User.updateOne(
-                        { _id: new ObjectId(buyerId) },
-                        {
-                            $set: {
-                                "subscription.purchasedThisMonth": 0,
-                                "subscription.currentMonth": currentMonth,
-                            },
-                        },
-                    );
-                }
-
-                // Check purchase limit
-                if (
-                    subscription.purchaseLimit !== -1 &&
-                    subscription.purchasedThisMonth >= subscription.purchaseLimit
-                ) {
-                    return res.status(403).send({
-                        error: "Monthly purchase limit reached",
-                    });
-                }
-
-                if (artwork.isSold) {
-                    return res.status(400).send({
-                        error: "Artwork already sold",
-                    });
-                }
-
-                const transactionId = `AH-P-${artwork._id.toString().slice(-6).toUpperCase()}`;
-
-                const purchaseData = {
-                    transactionId,
-                    artworkId: artwork._id.toString(),
-                    artworkTitle: artwork.title,
-                    artworkImage: artwork.image,
-                    artworkCategory: artwork.category,
-                    price: artwork.price,
-
-                    artistId: artwork.artistId,
-                    artistName: artwork.artistName,
-
-                    buyerId,
-                    buyerName: buyerName || buyer.name,
-                    buyerEmail: buyerEmail || buyer.email,
-                    buyerImage: buyerImage || buyer.image || null,
-
-                    purchasedAt: new Date().toISOString(),
-                };
-
-                await PurchasesArtworks.insertOne(purchaseData);
-
-                await ArtWorks.updateOne(
-                    {
-                        _id: new ObjectId(id),
-                    },
-                    {
-                        $set: {
-                            status: "sold",
-                            isSold: true,
-                            purchasedBy: buyerName,
-                        },
-                    },
-                );
-
-                // Increase monthly purchase count
-                await User.updateOne(
-                    { _id: new ObjectId(buyerId) },
-                    {
-                        $inc: {
-                            "subscription.purchasedThisMonth": 1,
-                        },
-                    },
-                );
-
-                res.send({
-                    success: true,
-                    message: "Artwork purchased successfully",
-                });
-            } catch (error) {
-                res.status(500).send({
-                    error: error.message,
-                });
-            }
-        });
-
-        app.get("/user", async (req, res) => {
-            const currentMonth = new Date().toISOString().slice(0, 7);
-
-            await User.updateMany(
-                {
-                    "subscription.currentMonth": {
-                        $ne: currentMonth,
-                    },
+        const session = await stripe.checkout.sessions.create({
+          customer_email: buyerEmail || buyer?.email || undefined,
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: artwork.title,
+                  images: artwork.image ? [artwork.image] : [],
                 },
-                {
-                    $set: {
-                        "subscription.currentMonth": currentMonth,
-                        "subscription.purchasedThisMonth": 0,
-                    },
+                unit_amount: Math.round(artwork.price * 100),
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
+          metadata: {
+            artworkId: id.toString(),
+            buyerId: buyerId.toString(),
+            buyerName: String(buyerName || buyer.name || ""),
+            buyerEmail: String(buyerEmail || buyer.email || ""),
+            buyerImage: String(buyerImage || buyer.image || ""),
+            type: "artwork",
+          },
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.post("/create-checkout/subscription", async (req, res) => {
+      try {
+        const { userId, plan } = req.body;
+
+        if (!ObjectId.isValid(userId)) {
+          return res.status(400).send({ error: "Invalid user id" });
+        }
+
+        const user = await User.findOne({ _id: new ObjectId(userId) });
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        let priceInCents = 0;
+        if (plan === "pro") {
+          priceInCents = 999;
+        } else if (plan === "premium") {
+          priceInCents = 1999;
+        } else {
+          return res.status(400).send({ error: "Invalid plan" });
+        }
+
+        const session = await stripe.checkout.sessions.create({
+          customer_email: user?.email || undefined,
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: `ArtHub ${plan.charAt(0).toUpperCase() + plan.slice(1)} Subscription`,
                 },
-            );
-
-            const user = await User.find().toArray();
-
-            res.send(user);
+                unit_amount: priceInCents,
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
+          metadata: {
+            userId: userId.toString(),
+            plan: plan,
+            type: "subscription",
+          },
         });
 
-        app.patch("/user/:id", async (req, res) => {
-            try {
-                const { id } = req.params;
-                const { role } = req.body;
+        res.send({ url: session.url });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
 
-                const result = await User.updateOne(
-                    { _id: new ObjectId(id) },
-                    {
-                        $set: {
-                            role,
-                            updatedAt: new Date(),
-                        },
-                    },
-                );
-
-                res.send({
-                    success: true,
-                    modifiedCount: result.modifiedCount,
-                });
-            } catch (error) {
-                res.status(500).send({ error: error.message });
-            }
+    app.get("/verify-payment/:sessionId", async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        res.send({
+          status: session.status,
+          payment_status: session.payment_status,
+          metadata: session.metadata,
         });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.post("/purchase/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            error: "Invalid artwork id",
+          });
+        }
+
+        if (!ObjectId.isValid(buyerId)) {
+          return res.status(400).send({
+            error: "Invalid buyer id",
+          });
+        }
+
+        const artwork = await ArtWorks.findOne({
+          _id: new ObjectId(id),
+        });
+
+        const buyer = await User.findOne({
+          _id: new ObjectId(buyerId),
+        });
+
+        if (!buyer) {
+          return res.status(404).send({
+            error: "Buyer not found",
+          });
+        }
+
+        if (!artwork) {
+          return res.status(404).send({
+            error: "Artwork not found",
+          });
+        }
+
+        if (artwork.artistId === buyerId) {
+          return res.status(400).send({
+            error: "Artists cannot purchase their own artwork",
+          });
+        }
+
+        if (buyer.role === "artist") {
+          return res.status(403).send({
+            error: "Artist accounts cannot purchase artworks",
+          });
+        }
+
+        // Subscription validation
+        const currentMonth = new Date().toISOString().slice(0, 7);
+
+        if (!buyer.subscription) {
+          return res.status(400).send({
+            error: "No subscription found",
+          });
+        }
+
+        let subscription = buyer.subscription;
+
+        // Reset monthly purchase
+        if (subscription.currentMonth !== currentMonth) {
+          subscription.purchasedThisMonth = 0;
+          subscription.currentMonth = currentMonth;
+
+          await User.updateOne(
+            { _id: new ObjectId(buyerId) },
+            {
+              $set: {
+                "subscription.purchasedThisMonth": 0,
+                "subscription.currentMonth": currentMonth,
+              },
+            },
+          );
+        }
+
+        // Check purchase limit
+        if (
+          subscription.purchaseLimit !== -1 &&
+          subscription.purchasedThisMonth >= subscription.purchaseLimit
+        ) {
+          return res.status(403).send({
+            error: "Monthly purchase limit reached",
+          });
+        }
+
+        if (artwork.isSold) {
+          return res.status(400).send({
+            error: "Artwork already sold",
+          });
+        }
+
+        const transactionId = `AH-P-${artwork._id.toString().slice(-6).toUpperCase()}`;
+
+        const purchaseData = {
+          transactionId,
+          artworkId: artwork._id.toString(),
+          artworkTitle: artwork.title,
+          artworkImage: artwork.image,
+          artworkCategory: artwork.category,
+          price: artwork.price,
+
+          artistId: artwork.artistId,
+          artistName: artwork.artistName,
+
+          buyerId,
+          buyerName: buyerName || buyer.name,
+          buyerEmail: buyerEmail || buyer.email,
+          buyerImage: buyerImage || buyer.image || null,
+
+          purchasedAt: new Date().toISOString(),
+        };
+
+        await PurchasesArtworks.insertOne(purchaseData);
+
+        await ArtWorks.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              status: "sold",
+              isSold: true,
+              purchasedBy: buyerName,
+            },
+          },
+        );
+
+        // Increase monthly purchase count
+        await User.updateOne(
+          { _id: new ObjectId(buyerId) },
+          {
+            $inc: {
+              "subscription.purchasedThisMonth": 1,
+            },
+          },
+        );
+
+        res.send({
+          success: true,
+          message: "Artwork purchased successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+    app.get("/user", async (req, res) => {
+      const currentMonth = new Date().toISOString().slice(0, 7);
+
+      await User.updateMany(
+        {
+          "subscription.currentMonth": {
+            $ne: currentMonth,
+          },
+        },
+        {
+          $set: {
+            "subscription.currentMonth": currentMonth,
+            "subscription.purchasedThisMonth": 0,
+          },
+        },
+      );
+
+      const user = await User.find().toArray();
+
+      res.send(user);
+    });
+
+    app.patch("/user/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body;
+
+        const result = await User.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              role,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        res.send({
+          success: true,
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.patch("/user/:id/profile", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { name, email, image } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid user id" });
+        }
+
+        const updateFields = {};
+        if (name !== undefined) updateFields.name = name;
+        if (email !== undefined) updateFields.email = email;
+        if (image !== undefined) updateFields.image = image;
+
+        if (Object.keys(updateFields).length === 0) {
+          return res.status(400).send({ error: "No fields provided to update" });
+        }
+
+        const result = await User.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateFields }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        const artworkUpdate = {};
+        if (name !== undefined) artworkUpdate.artistName = name;
+        if (email !== undefined) artworkUpdate.artistEmail = email;
+
+        if (Object.keys(artworkUpdate).length > 0) {
+          await ArtWorks.updateMany(
+            { artistId: id },
+            { $set: artworkUpdate }
+          );
+        }
+
+        const purchaseBuyerUpdate = {};
+        if (name !== undefined) purchaseBuyerUpdate.buyerName = name;
+        if (email !== undefined) purchaseBuyerUpdate.buyerEmail = email;
+        if (image !== undefined) purchaseBuyerUpdate.buyerImage = image || null;
+
+        if (Object.keys(purchaseBuyerUpdate).length > 0) {
+          await PurchasesArtworks.updateMany(
+            { buyerId: id },
+            { $set: purchaseBuyerUpdate }
+          );
+        }
+
+        if (name !== undefined) {
+          await PurchasesArtworks.updateMany(
+            { artistId: id },
+            { $set: { artistName: name } }
+          );
+        }
+
+        const commentUpdate = {};
+        if (name !== undefined) commentUpdate.userName = name;
+        if (image !== undefined) commentUpdate.userImage = image || null;
+
+        if (Object.keys(commentUpdate).length > 0) {
+          await Comments.updateMany(
+            { userId: id },
+            { $set: commentUpdate }
+          );
+        }
+
+        const subHistoryUpdate = {};
+        if (name !== undefined) subHistoryUpdate.userName = name;
+        if (email !== undefined) subHistoryUpdate.userEmail = email;
+
+        if (Object.keys(subHistoryUpdate).length > 0) {
+          await SubscriptionHistory.updateMany(
+            { userId: id },
+            { $set: subHistoryUpdate }
+          );
+        }
+
+        res.send({ success: true, message: "Profile and all related collections updated successfully" });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.get("/artist/:id/stats", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid artist id" });
+        }
+
+        const artist = await User.findOne({ _id: new ObjectId(id) });
+        if (!artist) {
+          return res.status(404).send({ error: "Artist not found" });
+        }
+
+        const totalArtworks = await ArtWorks.countDocuments({ artistId: id });
+
+        const soldArtworks = await ArtWorks.countDocuments({
+          artistId: id,
+          $or: [
+            { isSold: true },
+            { status: "sold" }
+          ]
+        });
+
+        res.send({
+          success: true,
+          artist: {
+            name: artist.name,
+            email: artist.email,
+            image: artist.image || null,
+            createdAt: artist.createdAt,
+            totalArtworks,
+            soldArtworks,
+          }
+        });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.patch("/user/:id/subscription", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { plan } = req.body;
+
+        const user = await User.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!user) {
+          return res.status(404).send({
+            error: "User not found",
+          });
+        }
+
+        const previousPlan = user.subscription?.plan || "free";
+
+        let purchaseLimit = 3;
+
+        if (plan === "pro") {
+          purchaseLimit = 9;
+        }
+
+        if (plan === "premium") {
+          purchaseLimit = -1;
+        }
+
+        const result = await User.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              subscription: {
+                plan,
+                purchaseLimit,
+                purchasedThisMonth: 0,
+                currentMonth: new Date().toISOString().slice(0, 7),
+              },
+            },
+          },
+        );
+
+        const transactionId = `AH-S-${id.toString().slice(-6).toUpperCase()}`;
+
+        await SubscriptionHistory.insertOne({
+          transactionId,
+          userId: id,
+          userName: user.name,
+          userEmail: user.email,
+
+          previousPlan: previousPlan,
+          newPlan: plan,
+
+          changedAt: new Date().toISOString(),
+        });
+
+        res.send({
+          success: true,
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+    // GET Subscription History (ADMIN DASHBOARD)
+    app.get("/subscription-history", async (req, res) => {
+      try {
+        const { userId } = req.query;
+
+        let query = {};
+        if (userId) {
+          query.userId = userId;
+        }
+
+        const history = await SubscriptionHistory
+          .find(query)
+          .sort({ changedAt: -1 })
+          .toArray();
+
+        res.send(history);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.patch("/sync-purchases", async (req, res) => {
+      try {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+
+        const users = await User.find().toArray();
+
+        for (const user of users) {
+          const purchaseCount = await PurchasesArtworks.countDocuments({
+            buyerId: user._id.toString(),
+            purchasedAt: {
+              $regex: `^${currentMonth}`,
+            },
+          });
+
+          await User.updateOne(
+            { _id: user._id },
+            {
+              $set: {
+                "subscription.currentMonth": currentMonth,
+                "subscription.purchasedThisMonth": purchaseCount,
+              },
+            },
+          );
+        }
+
+        res.send({
+          success: true,
+          message: "Purchase counts synced successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+    app.get("/purchasehistory", async (req, res) => {
+      try {
+        const { artistId, buyerId } = req.query;
+
+        let query = {};
+
+        if (artistId) query.artistId = artistId;
+        if (buyerId) query.buyerId = buyerId;
+
+        const history = await PurchasesArtworks.find(query)
+          .sort({ purchasedAt: -1 })
+          .toArray();
+
+        res.send(history);
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+    app.get("/transactions", async (req, res) => {
+      try {
+        const purchases = await PurchasesArtworks.find().toArray();
+
+        const subscriptions = await SubscriptionHistory.find().toArray();
+
+        const purchaseTx = purchases.map(p => ({
+          transactionId: `AH-P-${p._id.toString().slice(-6).toUpperCase()}`,
+          type: "Purchase",
+          email: p.buyerEmail,
+          amount: `$${p.price}`,
+          date: new Date(p.purchasedAt).toLocaleDateString(),
+        }));
+
+        const subscriptionTx = subscriptions.map(s => ({
+          transactionId: `AH-S-${s._id.toString().slice(-6).toUpperCase()}`,
+          type: "Subscription",
+          email: s.userEmail,
+          amount: s.newPlan === "premium" ? "$99.00" : s.newPlan === "pro" ? "$49.00" : "$29.00",
+          date: new Date(s.changedAt).toLocaleDateString(),
+        }));
+
+        const all = [...purchaseTx, ...subscriptionTx]
+          .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        res.send(all);
+
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.get("/transactions/daily", async (req, res) => {
+      try {
+        const purchases = await PurchasesArtworks.find().toArray();
+        const subscriptions = await SubscriptionHistory.find().toArray();
+
+        const dailyMap = {};
+
+        purchases.forEach(p => {
+          const date = p.purchasedAt?.slice(5, 10);
+          const [month, day] = date.split("-");
+          const key = `${parseInt(month)}/${parseInt(day)}`;
+          if (!dailyMap[key]) dailyMap[key] = { date: key, artwork: 0, subscription: 0 };
+          dailyMap[key].artwork += p.price || 0;
+        });
+
+        subscriptions.forEach(s => {
+          const date = s.changedAt?.slice(5, 10);
+          const [month, day] = date.split("-");
+          const key = `${parseInt(month)}/${parseInt(day)}`;
+          if (!dailyMap[key]) dailyMap[key] = { date: key, artwork: 0, subscription: 0 };
+          const amount = s.newPlan === "premium" ? 99 : s.newPlan === "pro" ? 49 : 29;
+          dailyMap[key].subscription += amount;
+        });
+
+        const result = Object.values(dailyMap).sort((a, b) => {
+          const [am, ad] = a.date.split("/").map(Number);
+          const [bm, bd] = b.date.split("/").map(Number);
+          return am !== bm ? am - bm : ad - bd;
+        });
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // --------------Comments---------------------
+    app.post("/comments", async (req, res) => {
+      try {
+        const {
+          artworkId,
+          userId,
+          userName,
+          userImage,
+          comment,
+        } = req.body;
+
+        if (
+          !artworkId ||
+          !userId ||
+          !userName ||
+          !comment?.trim()
+        ) {
+          return res.status(400).send({
+            error: "Missing required fields",
+          });
+        }
+
+        const user = await User.findOne({
+          _id: new ObjectId(userId),
+        });
+
+        if (!user) {
+          return res.status(404).send({
+            error: "User not found",
+          });
+        }
+
+        if (user.role !== "user") {
+          return res.status(403).send({
+            error: "Only users can comment",
+          });
+        }
+
+        const artwork = await ArtWorks.findOne({
+          _id: new ObjectId(artworkId),
+        });
+
+        if (!artwork) {
+          return res.status(404).send({
+            error: "Artwork not found",
+          });
+        }
+
+        const newComment = {
+          artworkId,
+          userId,
+          userName,
+          userImage: userImage || null,
+          comment: comment.trim(),
+          createdAt: new Date().toISOString(),
+        };
+
+        const result = await Comments.insertOne(newComment);
+
+        res.status(201).send({
+          success: true,
+          comment: {
+            _id: result.insertedId,
+            ...newComment,
+          },
+        });
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+
+    app.get("/comments/:artworkId", async (req, res) => {
+      try {
+        const { artworkId } = req.params;
+
+        const comments = await Comments.find({
+          artworkId,
+        })
+          .sort({
+            createdAt: -1,
+          })
+          .toArray();
+
+        res.send(comments);
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+      }
+    });
+
+
+    app.get("/comments/user/:userId", async (req, res) => {
+      console.log("Requested User ID:", req.params.userId);
+      try {
+        const { userId } = req.params;
+
+        const comments = await Comments.aggregate([
+          {
+            $match: {
+              userId,
+            },
+          },
+          {
+            $addFields: {
+              artworkObjectId: {
+                $toObjectId: "$artworkId",
+              },
+            },
+          },
+          {
+            $lookup: {
+              from: "ArtWorks",
+              localField: "artworkObjectId",
+              foreignField: "_id",
+              as: "artwork",
+            },
+          },
+          {
+            $unwind: "$artwork",
+          },
+          {
+            $sort: {
+              createdAt: -1,
+            },
+          },
+          {
+            $project: {
+              userName: 1,
+              userImage: 1,
+              comment: 1,
+              createdAt: 1,
+              artworkId: 1,
+
+              artworkTitle: "$artwork.title",
+              artworkImage: "$artwork.image",
+            },
+          },
+        ]).toArray();
+        console.log(comments);
+        res.send(comments);
+      } catch (error) {
+        res.status(500).send({
+          error: error.message,
+        });
+        const comments = await Comments.find({
+          userId: req.params.userId,
+        })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        console.log("Found Comments:", comments);
+
+        res.send(comments);
+      }
+    });
+    // -----------comment end------------- 
+
+
+
+
+
+    await client.db("admin").command({ ping: 1 });
+    console.log("ping deployed");
+  } catch (error) {
+    console.error("MongoDB connection error:", error);
+  }
+};
+
+run();
+
+if (!process.env.VERCEL) {
+  app.listen(Port, () => {
+    console.log(`Server Successfully Run on ${Port}`);
+  });
+}
+
+export default app;
