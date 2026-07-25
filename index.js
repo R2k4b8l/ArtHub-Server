@@ -501,3 +501,252 @@ const run = async () => {
                     return res.status(404).send({ error: "User not found" });
                 }
 
+                let priceInCents = 0;
+                if (plan === "pro") {
+                    priceInCents = 999;
+                } else if (plan === "premium") {
+                    priceInCents = 1999;
+                } else {
+                    return res.status(400).send({ error: "Invalid plan" });
+                }
+
+                const session = await stripe.checkout.sessions.create({
+                    customer_email: user?.email || undefined,
+                    payment_method_types: ["card"],
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: "usd",
+                                product_data: {
+                                    name: `ArtHub ${plan.charAt(0).toUpperCase() + plan.slice(1)} Subscription`,
+                                },
+                                unit_amount: priceInCents,
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    mode: "payment",
+                    success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
+                    metadata: {
+                        userId: userId.toString(),
+                        plan: plan,
+                        type: "subscription",
+                    },
+                });
+
+                res.send({ url: session.url });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.get("/verify-payment/:sessionId", async (req, res) => {
+            try {
+                const { sessionId } = req.params;
+                const session = await stripe.checkout.sessions.retrieve(sessionId);
+                res.send({
+                    status: session.status,
+                    payment_status: session.payment_status,
+                    metadata: session.metadata,
+                });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.post("/purchase/:id", async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({
+                        error: "Invalid artwork id",
+                    });
+                }
+
+                if (!ObjectId.isValid(buyerId)) {
+                    return res.status(400).send({
+                        error: "Invalid buyer id",
+                    });
+                }
+
+                const artwork = await ArtWorks.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                const buyer = await User.findOne({
+                    _id: new ObjectId(buyerId),
+                });
+
+                if (!buyer) {
+                    return res.status(404).send({
+                        error: "Buyer not found",
+                    });
+                }
+
+                if (!artwork) {
+                    return res.status(404).send({
+                        error: "Artwork not found",
+                    });
+                }
+
+                if (artwork.artistId === buyerId) {
+                    return res.status(400).send({
+                        error: "Artists cannot purchase their own artwork",
+                    });
+                }
+
+                if (buyer.role === "artist") {
+                    return res.status(403).send({
+                        error: "Artist accounts cannot purchase artworks",
+                    });
+                }
+
+                // Subscription validation
+                const currentMonth = new Date().toISOString().slice(0, 7);
+
+                if (!buyer.subscription) {
+                    return res.status(400).send({
+                        error: "No subscription found",
+                    });
+                }
+
+                let subscription = buyer.subscription;
+
+                // Reset monthly purchase
+                if (subscription.currentMonth !== currentMonth) {
+                    subscription.purchasedThisMonth = 0;
+                    subscription.currentMonth = currentMonth;
+
+                    await User.updateOne(
+                        { _id: new ObjectId(buyerId) },
+                        {
+                            $set: {
+                                "subscription.purchasedThisMonth": 0,
+                                "subscription.currentMonth": currentMonth,
+                            },
+                        },
+                    );
+                }
+
+                // Check purchase limit
+                if (
+                    subscription.purchaseLimit !== -1 &&
+                    subscription.purchasedThisMonth >= subscription.purchaseLimit
+                ) {
+                    return res.status(403).send({
+                        error: "Monthly purchase limit reached",
+                    });
+                }
+
+                if (artwork.isSold) {
+                    return res.status(400).send({
+                        error: "Artwork already sold",
+                    });
+                }
+
+                const transactionId = `AH-P-${artwork._id.toString().slice(-6).toUpperCase()}`;
+
+                const purchaseData = {
+                    transactionId,
+                    artworkId: artwork._id.toString(),
+                    artworkTitle: artwork.title,
+                    artworkImage: artwork.image,
+                    artworkCategory: artwork.category,
+                    price: artwork.price,
+
+                    artistId: artwork.artistId,
+                    artistName: artwork.artistName,
+
+                    buyerId,
+                    buyerName: buyerName || buyer.name,
+                    buyerEmail: buyerEmail || buyer.email,
+                    buyerImage: buyerImage || buyer.image || null,
+
+                    purchasedAt: new Date().toISOString(),
+                };
+
+                await PurchasesArtworks.insertOne(purchaseData);
+
+                await ArtWorks.updateOne(
+                    {
+                        _id: new ObjectId(id),
+                    },
+                    {
+                        $set: {
+                            status: "sold",
+                            isSold: true,
+                            purchasedBy: buyerName,
+                        },
+                    },
+                );
+
+                // Increase monthly purchase count
+                await User.updateOne(
+                    { _id: new ObjectId(buyerId) },
+                    {
+                        $inc: {
+                            "subscription.purchasedThisMonth": 1,
+                        },
+                    },
+                );
+
+                res.send({
+                    success: true,
+                    message: "Artwork purchased successfully",
+                });
+            } catch (error) {
+                res.status(500).send({
+                    error: error.message,
+                });
+            }
+        });
+
+        app.get("/user", async (req, res) => {
+            const currentMonth = new Date().toISOString().slice(0, 7);
+
+            await User.updateMany(
+                {
+                    "subscription.currentMonth": {
+                        $ne: currentMonth,
+                    },
+                },
+                {
+                    $set: {
+                        "subscription.currentMonth": currentMonth,
+                        "subscription.purchasedThisMonth": 0,
+                    },
+                },
+            );
+
+            const user = await User.find().toArray();
+
+            res.send(user);
+        });
+
+        app.patch("/user/:id", async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { role } = req.body;
+
+                const result = await User.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            role,
+                            updatedAt: new Date(),
+                        },
+                    },
+                );
+
+                res.send({
+                    success: true,
+                    modifiedCount: result.modifiedCount,
+                });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
