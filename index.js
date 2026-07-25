@@ -229,3 +229,275 @@ const run = async () => {
                 res.status(500).send({ error: error.message });
             }
         });
+
+        // Filter
+        app.get("/artworks/filters", async (req, res) => {
+            try {
+                const categories = await ArtWorks.distinct("category");
+                const statuses = await ArtWorks.distinct("status");
+                res.send({
+                    categories: categories.filter(Boolean),
+                    statuses: statuses.filter(Boolean),
+                });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        // Top Artists
+        app.get("/artists/top", async (req, res) => {
+            try {
+                const artists = await User.find({ role: "artist" }).toArray();
+                const artistIds = artists.map(artist => artist._id.toString());
+
+                // Fetch artworks for these artists only
+                const artworks = await ArtWorks.find({ artistId: { $in: artistIds } }).toArray();
+
+                const artistMap = {};
+                artists.forEach(artist => {
+                    artistMap[artist._id.toString()] = {
+                        id: artist._id.toString(),
+                        name: artist.name,
+                        email: artist.email,
+                        image: artist.image || "/default-avatar.png",
+                        artworks: 0,
+                        sales: 0
+                    };
+                });
+
+                artworks.forEach(art => {
+                    const aId = art.artistId;
+                    if (aId && artistMap[aId]) {
+                        artistMap[aId].artworks++;
+                        if (art.isSold || art.status === "sold") {
+                            artistMap[aId].sales++;
+                        }
+                    }
+                });
+
+                const topArtists = Object.values(artistMap)
+                    .sort((a, b) => {
+                        const scoreA = a.sales * 10 + a.artworks;
+                        const scoreB = b.sales * 10 + b.artworks;
+                        return scoreB - scoreA;
+                    })
+                    .slice(0, 3);
+
+                res.send(topArtists);
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.post("/artworks", async (req, res) => {
+            try {
+                const {
+                    title,
+                    category,
+                    description,
+                    price,
+                    image,
+                    artistName,
+                    artistEmail,
+                    artistId,
+                } = req.body;
+
+                if (
+                    !title ||
+                    !category ||
+                    !price ||
+                    !image ||
+                    !artistName ||
+                    !artistEmail
+                ) {
+                    return res.status(400).send({ error: "Missing required fields" });
+                }
+
+                const newArtwork = {
+                    title,
+                    category,
+                    description: description || "",
+                    price: parseFloat(price),
+                    image,
+                    artistName,
+                    artistEmail,
+                    artistId: artistId || null,
+                    status: "available",
+                    isSold: false,
+                    createdAt: new Date().toISOString(),
+                    purchasedBy: null,
+                };
+
+                const result = await ArtWorks.insertOne(newArtwork);
+                res.status(201).send({ success: true, insertedId: result.insertedId });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.patch("/artworks/:id", async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ error: "Invalid artwork id" });
+                }
+
+                const { title, category, description, price } = req.body;
+                const updateFields = {};
+
+                if (title !== undefined) updateFields.title = title;
+                if (category !== undefined) updateFields.category = category;
+                if (description !== undefined) updateFields.description = description;
+                if (price !== undefined) {
+                    const parsedPrice = parseFloat(price);
+                    if (Number.isNaN(parsedPrice)) {
+                        return res.status(400).send({ error: "Invalid price" });
+                    }
+                    updateFields.price = parsedPrice;
+                }
+
+                if (Object.keys(updateFields).length === 0) {
+                    return res
+                        .status(400)
+                        .send({ error: "No artwork fields provided to update" });
+                }
+
+                const result = await ArtWorks.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateFields },
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ error: "Artwork not found" });
+                }
+
+                res.send({ success: true });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.delete("/artworks/:id", async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ error: "Invalid artwork id" });
+                }
+
+                const result = await ArtWorks.deleteOne({ _id: new ObjectId(id) });
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ error: "Artwork not found" });
+                }
+
+                res.send({ success: true });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.post("/create-checkout/artwork/:id", async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { buyerId, buyerName, buyerEmail, buyerImage } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ error: "Invalid artwork id" });
+                }
+                if (!ObjectId.isValid(buyerId)) {
+                    return res.status(400).send({ error: "Invalid buyer id" });
+                }
+
+                const artwork = await ArtWorks.findOne({ _id: new ObjectId(id) });
+                const buyer = await User.findOne({ _id: new ObjectId(buyerId) });
+
+                if (!artwork) {
+                    return res.status(404).send({ error: "Artwork not found" });
+                }
+                if (!buyer) {
+                    return res.status(404).send({ error: "Buyer not found" });
+                }
+                if (artwork.isSold) {
+                    return res.status(400).send({ error: "Artwork already sold" });
+                }
+                if (artwork.artistId === buyerId) {
+                    return res.status(400).send({ error: "Artists cannot purchase their own artwork" });
+                }
+                if (buyer.role === "artist") {
+                    return res.status(403).send({ error: "Artist accounts cannot purchase artworks" });
+                }
+                if (!buyer.subscription) {
+                    return res.status(400).send({ error: "No subscription found" });
+                }
+
+                const currentMonth = new Date().toISOString().slice(0, 7);
+                let subscription = buyer.subscription;
+
+                if (subscription.currentMonth !== currentMonth) {
+                    subscription.purchasedThisMonth = 0;
+                    subscription.currentMonth = currentMonth;
+                    await User.updateOne(
+                        { _id: new ObjectId(buyerId) },
+                        {
+                            $set: {
+                                "subscription.purchasedThisMonth": 0,
+                                "subscription.currentMonth": currentMonth,
+                            },
+                        }
+                    );
+                }
+
+                if (
+                    subscription.purchaseLimit !== -1 &&
+                    subscription.purchasedThisMonth >= subscription.purchaseLimit
+                ) {
+                    return res.status(403).send({ error: "Monthly purchase limit reached" });
+                }
+
+                const session = await stripe.checkout.sessions.create({
+                    customer_email: buyerEmail || buyer?.email || undefined,
+                    payment_method_types: ["card"],
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: "usd",
+                                product_data: {
+                                    name: artwork.title,
+                                    images: artwork.image ? [artwork.image] : [],
+                                },
+                                unit_amount: Math.round(artwork.price * 100),
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    mode: "payment",
+                    success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
+                    metadata: {
+                        artworkId: id.toString(),
+                        buyerId: buyerId.toString(),
+                        buyerName: String(buyerName || buyer.name || ""),
+                        buyerEmail: String(buyerEmail || buyer.email || ""),
+                        buyerImage: String(buyerImage || buyer.image || ""),
+                        type: "artwork",
+                    },
+                });
+
+                res.send({ url: session.url });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+        app.post("/create-checkout/subscription", async (req, res) => {
+            try {
+                const { userId, plan } = req.body;
+
+                if (!ObjectId.isValid(userId)) {
+                    return res.status(400).send({ error: "Invalid user id" });
+                }
+
+                const user = await User.findOne({ _id: new ObjectId(userId) });
+                if (!user) {
+                    return res.status(404).send({ error: "User not found" });
+                }
+
